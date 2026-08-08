@@ -24,7 +24,8 @@ def main() -> None:
                    help="output dir (default: out/<image name>)")
     p.add_argument("--size", type=int, default=1080)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--device", default="mps", choices=["mps", "cpu"])
+    p.add_argument("--device", default="auto",
+                   choices=["auto", "mps", "cuda", "cpu"])
     p.add_argument("--supersample", type=int, default=2)
     p.add_argument("--no-video", action="store_true")
     p.add_argument("--classic", action="store_true",

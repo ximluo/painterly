@@ -76,13 +76,13 @@ Useful flags:
 | --- | --- |
 | `--size N` | long-edge working resolution (default 1080) |
 | `--seed N` | reroll the stroke plan |
-| `--device mps\|cpu` | depth model device (default `mps`) |
+| `--device auto\|mps\|cuda\|cpu` | depth model device (default `auto`: MPS > CUDA > CPU) |
 | `--face-flow one-go\|v11\|together` | how faces are scheduled (default `one-go`) |
 | `--no-video` | skip the timelapse, just render the painting |
 | `--classic` | plain Hertzmann strokes, no flow field or ribbons |
 | `--flat` | untextured flat strokes |
 
-The first run downloads Depth Anything V2 (small) from Hugging Face; BiRefNet and YuNet weights are vendored or fetched once, and per-image model outputs are cached in `~/.cache/painterly`, so re-renders of the same photo skip straight to stroke planning. A 1080p painting with its 20-second timelapse takes about a minute on an M-series Mac.
+The first run downloads Depth Anything V2 (small) from Hugging Face; BiRefNet and YuNet weights are vendored or fetched once, and per-image model outputs are cached in `~/.cache/painterly`, so re-renders of the same photo skip straight to stroke planning. A 1080p painting with its 20-second timelapse takes about a minute on an M-series Mac. Cross-platform: the depth model picks MPS, CUDA, or CPU automatically (`--device` overrides), and everything else is OpenCV + ONNX Runtime, so macOS, Linux, and Windows all work.
 
 ## Layout
 

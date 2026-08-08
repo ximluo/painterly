@@ -164,10 +164,23 @@ def _cached(cfg: Config, name: str, compute) -> np.ndarray:
     return arr
 
 
+def _resolve_device(device: str) -> str:
+    if device != "auto":
+        return device
+    import torch
+
+    if torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
 def _depth(img: np.ndarray, cfg: Config) -> np.ndarray:
     from transformers import pipeline  # deferred: torch import is slow
 
-    pipe = pipeline(task="depth-estimation", model=DEPTH_MODEL, device=cfg.device)
+    pipe = pipeline(task="depth-estimation", model=DEPTH_MODEL,
+                    device=_resolve_device(cfg.device))
     pred = pipe(Image.fromarray(img))["predicted_depth"].squeeze().float().cpu().numpy()
     pred = cv2.resize(pred, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_LINEAR)
     lo, hi = float(pred.min()), float(pred.max())

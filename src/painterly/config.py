@@ -8,7 +8,7 @@ class Config:
     out_dir: Path
     size: int = 1080                    # long-edge resize of the working image
     seed: int = 0
-    device: str = "mps"                 # depth model device: "mps" | "cpu"
+    device: str = "auto"                 # "auto" -> mps > cuda > cpu
     debug: bool = False
     video: bool = True
     texture: bool = True
