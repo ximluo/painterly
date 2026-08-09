@@ -46,7 +46,7 @@ class Config:
     jitter: float = 12.0                # max HSV value jitter (0-255) at detail=0
     sat_scale: tuple[float, ...] = (0.75, 0.85, 1.0, 1.0, 1.0)  # lean block-in, fat color
 
-    # Wash (imprimatura) phase
+    # Wash phase
     wash_radius: int = 128
     wash_alpha: float = 0.75
     wash_tone_pull: float = 0.35        # lerp toward the paper ground tone
@@ -59,7 +59,7 @@ class Config:
     sketch_color: tuple[int, int, int] = (170, 166, 160)  # the whole sketch
     sketch_length_budget: float = 5.0   # total line length, x image diagonal
     sketch_max_seg: float = 150.0       # split long chains so they draw over frames
-    sketch_passes: tuple[int, int] = (1, 2)  # restated passes per contour (min, max)
+    sketch_passes: tuple[int, int] = (1, 2)  # passes drawn over each contour (min, max)
     sketch_jitter: float = 2.0          # px of hand wobble on the first pass
     sketch_simplify: float = 10.0       # approxPolyDP epsilon, x scale
     sketch_erase_rate: float = 0.05     # chance a line is drawn wrong, undone, redrawn

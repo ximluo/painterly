@@ -23,7 +23,7 @@ def blank_canvas(h: int, w: int,
 
 
 def ground_color(src: np.ndarray) -> np.ndarray:
-    """Imprimatura tone: mean color, half-desaturated, clamped to a mid value.
+    """Wash tone: mean color, half-desaturated, clamped to a mid value.
 
     Keeps gaps in coverage reading as toned canvas rather than white paper.
     """
@@ -92,7 +92,7 @@ def draw_stroke(canvas: np.ndarray, stroke, scale: float = 1.0,
     roi = canvas[y0:y1, x0:x1]
     color = stroke.color
     if stroke.blend > 0.0:
-        # wet mixing; sampling along the spine is as plausible as a full-area
+        # wet mixing; sampling along the spine is close enough to a full-area
         # mean and much cheaper
         sx = np.clip(np.round(pts[:, 0]).astype(int), 0, w - 1)
         sy = np.clip(np.round(pts[:, 1]).astype(int), 0, h - 1)
@@ -100,7 +100,7 @@ def draw_stroke(canvas: np.ndarray, stroke, scale: float = 1.0,
             + stroke.blend * canvas[sy, sx].mean(axis=0)
     roi[:] = a * color + (1.0 - a) * roi
     if cover is not None:
-        # a thin wash only veils a pencil line; solid paint buries it
+        # a thin wash barely hides a pencil line; solid paint covers it
         ca = a[..., 0] * (0.35 if stroke.phase == WASH else 1.0)
         c = cover[y0:y1, x0:x1]
         c[:] = ca + (1.0 - ca) * c

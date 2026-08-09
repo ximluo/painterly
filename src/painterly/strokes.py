@@ -270,7 +270,7 @@ def _face_pass(src: np.ndarray, canvas: np.ndarray, painted: np.ndarray,
 def _wash_pass(src: np.ndarray, canvas: np.ndarray, maps: Maps, cfg: Config,
                rng: np.random.Generator, scale: float,
                strokes: list[Stroke], ground: np.ndarray) -> None:
-    """Imprimatura: tone the whole canvas with big thin desaturated washes.
+    """Wash pass: tone the whole canvas with big thin desaturated washes.
 
     Deliberately doesn't mark pixels painted, so the block-in still covers
     everything and the wash survives only as undertone.

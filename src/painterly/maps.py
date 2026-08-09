@@ -22,7 +22,7 @@ SALIENCY_MODEL = "birefnet-general-lite"
 class Maps:
     nearness: np.ndarray   # float32 [0,1], 1 = nearest (DA V2 is inverse depth)
     saliency: np.ndarray   # float32 [0,1] soft subject matte
-    detail: np.ndarray     # float32 [0,1] how much fine detail a pixel earns
+    detail: np.ndarray     # float32 [0,1] how much fine detail a pixel gets
     buckets: np.ndarray    # uint8 paint groups, 0 = farthest = painted first.
                            # the subject is promoted to the last group even
                            # when something else is nearer

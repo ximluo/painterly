@@ -1,8 +1,8 @@
 """Underdrawing: blurred Canny, vectorized into chains, drawn like a hand.
 
-Construction lines first, then each contour restated in 2-3 wobbly passes
+Construction lines first, then each contour drawn 2-3 times in wobbly passes
 that overshoot corners, with the occasional wrong line erased and redrawn.
-The imperfect build is the point; one clean vector line reads as a machine.
+The imperfection is the point; one clean vector line looks machine-drawn.
 """
 import cv2
 import numpy as np
@@ -148,7 +148,7 @@ def _restated_passes(em: _Emitter, pts: np.ndarray, cfg: Config, scale: float,
                      rng: np.random.Generator, lo: float = 0.30,
                      hi: float = 0.55, radius_mult: float = 1.0) -> None:
     """Build a line from overlapping passes: light and wobbly first, darker
-    and truer each restatement, the last one overshooting the ends."""
+    and more accurate each pass, the last one overshooting the ends."""
     n = int(rng.integers(cfg.sketch_passes[0], cfg.sketch_passes[1] + 1))
     for k in range(n):
         frac = (k + 1) / n
