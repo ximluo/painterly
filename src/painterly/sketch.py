@@ -1,10 +1,8 @@
-"""Underdrawing: line art extracted from the photo (blurred Canny — at
-sketch blur scales this gives clean structural contours), vectorized into
-polyline chains, and drawn the way a HAND draws (informed by Paints-UNDO
-and drawing pedagogy): light construction/envelope lines first, then each
-contour restated in 2-3 wobbly overlapping passes that overshoot corners,
-with the occasional wrong line erased and redrawn. One perfect vector line
-is the machine tell; the build is the human tell. No models.
+"""Underdrawing: blurred Canny, vectorized into chains, drawn like a hand.
+
+Construction lines first, then each contour restated in 2-3 wobbly passes
+that overshoot corners, with the occasional wrong line erased and redrawn.
+The imperfect build is the point; one clean vector line reads as a machine.
 """
 import cv2
 import numpy as np
@@ -24,9 +22,7 @@ def sketch_strokes(img: np.ndarray, maps: Maps, cfg: Config, seq0: int,
     h, w = img.shape[:2]
     scale = max(h, w) / 1080
 
-    # Three extraction scales: whole image, finer inside the subject, finest
-    # around detected faces — the drawing is densest exactly where an artist
-    # spends the most pencil time.
+    # three scales: whole image, finer inside the subject, finest on faces
     subj_mask = (maps.saliency > 0.5).astype(np.uint8)
     face_mask = (maps.faces >= 0.3).astype(np.uint8)
     lines = _line_art(img, sigma=1.4 * scale)
@@ -46,8 +42,7 @@ def sketch_strokes(img: np.ndarray, maps: Maps, cfg: Config, seq0: int,
     outline_chains = _subject_outline(maps.saliency, scale)
     outline = [seg for c in outline_chains
                for seg in _split(c, cfg.sketch_max_seg * scale)]
-    # Face chains get their own small budget (a few angular feature hints);
-    # everything else competes in the main budget.
+    # face chains get their own small budget; everything else competes
     diag = float(np.hypot(h, w))
     face_chains.sort(key=len, reverse=True)
     face_keep, face_len = [], 0.0
@@ -63,9 +58,6 @@ def sketch_strokes(img: np.ndarray, maps: Maps, cfg: Config, seq0: int,
     color = np.array(cfg.sketch_color, np.float32)
     em = _Emitter(maps, cfg, scale, seq0, color)
 
-    # Reference style: ONE tier of light-gray straight rough lines — every
-    # chain collapsed to long angular segments, restated once or twice,
-    # nothing darker than the gray, with occasional undo events.
     for pts in _construction_lines(outline_chains, maps, scale, rng):
         em.emit(pts, alpha=0.35, radius_mult=1.0, firmness=0.3)
 
@@ -98,8 +90,7 @@ def sketch_strokes(img: np.ndarray, maps: Maps, cfg: Config, seq0: int,
 
 
 def _ghost(chain: np.ndarray, scale: float, eps: float = 10.0) -> np.ndarray:
-    """Collapse a contour to long straight segments meeting at angles — the
-    rough gesture-sketch look, not contour tracing."""
+    """Collapse a contour to long straight segments meeting at angles."""
     approx = cv2.approxPolyDP(chain.reshape(-1, 1, 2).astype(np.int32),
                               eps * scale, False)
     return approx.reshape(-1, 2).astype(np.float32)
@@ -142,7 +133,7 @@ class _Emitter:
 
 
 def _tick_pending(pending, em: _Emitter, cfg, scale, rng):
-    """Count down the 'artist hasn't noticed yet' delay on wrong lines."""
+    """Count down the delay before a wrong line gets noticed and redrawn."""
     still = []
     for delay, gid, pts in pending:
         if delay <= 1:
@@ -156,9 +147,8 @@ def _tick_pending(pending, em: _Emitter, cfg, scale, rng):
 def _restated_passes(em: _Emitter, pts: np.ndarray, cfg: Config, scale: float,
                      rng: np.random.Generator, lo: float = 0.30,
                      hi: float = 0.55, radius_mult: float = 1.0) -> None:
-    """A line is built through overlapping imperfect passes, not drawn once:
-    light + wobbly first, darker + truer each restatement, final pass
-    overshooting the ends the way a confident stroke does."""
+    """Build a line from overlapping passes: light and wobbly first, darker
+    and truer each restatement, the last one overshooting the ends."""
     n = int(rng.integers(cfg.sketch_passes[0], cfg.sketch_passes[1] + 1))
     for k in range(n):
         frac = (k + 1) / n
@@ -166,8 +156,6 @@ def _restated_passes(em: _Emitter, pts: np.ndarray, cfg: Config, scale: float,
         pass_pts = _wobble(_trim(pts, rng, 0.15 * (1 - frac) + 0.03), amp, rng)
         if k == n - 1:
             pass_pts = _overshoot(pass_pts, rng.uniform(0.02, 0.05))
-        # Mock pen pressure: every pass carries its own weight and darkness,
-        # and its own within-stroke taper.
         em.emit(pass_pts,
                 alpha=min(cfg.sketch_alpha, (lo + (hi - lo) * frac)
                           * rng.uniform(0.85, 1.1)),
@@ -209,7 +197,7 @@ def _overshoot(pts: np.ndarray, frac: float) -> np.ndarray:
 
 
 def _wrongify(pts: np.ndarray, scale: float, rng: np.random.Generator) -> np.ndarray:
-    """The line the artist draws first — misplaced and mis-angled."""
+    """Misplace and mis-angle a line, as a first attempt to be erased."""
     c = pts.mean(axis=0)
     ang = np.radians(rng.uniform(3, 6)) * rng.choice([-1, 1])
     rot = np.array([[np.cos(ang), -np.sin(ang)], [np.sin(ang), np.cos(ang)]],
@@ -220,8 +208,7 @@ def _wrongify(pts: np.ndarray, scale: float, rng: np.random.Generator) -> np.nda
 
 def _construction_lines(outline_chains: list[np.ndarray], maps: Maps,
                         scale: float, rng: np.random.Generator) -> list[np.ndarray]:
-    """Light envelope lines boxing in the subject, plus face axis lines —
-    the guesses an artist makes before committing to contours."""
+    """Envelope lines boxing in the subject, plus face axis lines."""
     def line(a, b):  # densify so wobble can bend it like a hand-drawn line
         t = np.linspace(0, 1, 8, dtype=np.float32)[:, None]
         return _wobble(_overshoot((1 - t) * np.float32(a) + t * np.float32(b),
@@ -247,8 +234,11 @@ def _construction_lines(outline_chains: list[np.ndarray], maps: Maps,
 
 def _line_art(img: np.ndarray, sigma: float, lo: int = 50,
               hi: int = 130) -> np.ndarray:
-    """Structural contours as uint8 (255 = line). Heavy pre-blur suppresses
-    fur/texture edges so only shape boundaries survive."""
+    """Structural contours as uint8 (255 = line).
+
+    The heavy pre-blur suppresses fur and texture edges so only shape
+    boundaries survive.
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     blurred = cv2.GaussianBlur(gray, (0, 0), sigma)
     return cv2.Canny(blurred, lo, hi, L2gradient=True)

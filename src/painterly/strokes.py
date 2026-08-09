@@ -1,14 +1,4 @@
-"""Hertzmann '98 curved-brush stroke engine, modernized:
-
-- strokes follow an Edge Tangent Flow field (Kang et al. 2007, as used by
-  Im2Oil) instead of raw per-pixel gradients — neighboring strokes come out
-  locally parallel, which is what makes marks read as brushwork
-- each grown spine is collapsed to a single quadratic Bezier
-  (LearningToPaint-style, 3 control points) — no residual wobble
-- detail gate: fine brush layers only seed where the detail map is high
-- silhouette clip: strokes never grow across a depth discontinuity, which is
-  what makes depth-reordered playback artifact-free
-"""
+"""Curved-brush stroke engine: Hertzmann '98 over an Edge Tangent Flow field."""
 import colorsys
 from dataclasses import dataclass
 
@@ -29,21 +19,17 @@ class Stroke:
     radius: float
     color: np.ndarray   # (3,) float32 RGB 0-255
     alpha: float
-    bucket: int         # paint group; 0 for wash/sketch = exempt from masking
+    bucket: int         # paint group; 0 (wash/sketch) is exempt from masking
     layer: int
     seq: int
-    seed_near: float    # nearness at the seed (kept for debugging/analysis)
+    seed_near: float    # nearness at the seed, for debugging
     phase: int = PAINT
-    blend: float = 0.0  # wet mixing: fraction of the underlying canvas color
-                        # picked up by the brush (paint phases only)
-    firmness: float = 1.0  # 1 = fully loaded big brush, solid swath with
-                           # almost no taper; 0 = light expressive stroke
-    in_face: bool = False  # seeded inside a detected face region
-    in_eye: bool = False   # seeded inside an eye region (painted first
-                           # within the face, refined hardest at the end)
+    blend: float = 0.0     # wet mixing: how much canvas color the brush picks up
+    firmness: float = 1.0  # 1 = loaded big brush, no taper; 0 = light and loose
+    in_face: bool = False
+    in_eye: bool = False
     face_id: int = 0       # which face's ellipse the seed sits in (0 = none)
-    undo: int = 0          # sketch ctrl-Z: +gid draws onto a temp layer,
-                           # -gid removes that layer completely (no residue)
+    undo: int = 0          # sketch ctrl-Z: +gid draws to a temp layer, -gid drops it
 
 
 UNPAINTED_ERROR = 300.0  # forces the coarsest layer to cover the whole canvas
@@ -56,10 +42,12 @@ def _face_centers(face_ids: np.ndarray) -> dict[int, np.ndarray]:
 
 def _face_id_at(maps: Maps, sx: int, sy: int,
                 centers: dict[int, np.ndarray]) -> int:
-    """The id at the seed, or — for in-face strokes seeded in the feathered
-    ring outside the id ellipse (hairline, jaw) — the NEAREST face's id, so
-    the protection rule never half-blocks a face's own edge strokes (the
-    v0.12 slop bug)."""
+    """Face id at the seed, falling back to the nearest face.
+
+    Strokes in the feathered ring outside the ellipse (hairline, jaw) have no
+    id, and without the fallback the protection rule blocks a face's own
+    edge strokes.
+    """
     fid = int(maps.face_ids[sy, sx])
     if fid or not centers or maps.faces[sy, sx] <= 0.3:
         return fid
@@ -68,18 +56,18 @@ def _face_id_at(maps: Maps, sx: int, sy: int,
 
 
 def _etf(gray: np.ndarray, sigma: float):
-    """Edge Tangent Flow, cheap double-angle version: orientation is
-    pi-periodic so it's blurred in (cos2t, sin2t) space, magnitude-weighted
-    so weak/noisy pixels adopt the direction of nearby strong edges.
-    Returns (tx, ty, strength)."""
+    """Edge Tangent Flow -> (tx, ty, strength).
+
+    Orientation is pi-periodic, so blur in (cos2t, sin2t) space; weighting by
+    magnitude lets noisy pixels adopt nearby strong edges' direction.
+    """
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=5)
     gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=5)
     mag = np.hypot(gx, gy)
     theta = np.arctan2(gy, gx) + np.pi / 2
     c = mag * np.cos(2 * theta)
     s = mag * np.sin(2 * theta)
-    # Half the brush radius: coarse layers get strongly aligned fields,
-    # fine layers keep enough locality to trace small features (eyes!).
+    # half the brush radius: fine layers need locality to trace eyes
     sig = float(np.clip(0.5 * sigma, 1.5, 12.0))
     for _ in range(3):
         c = cv2.GaussianBlur(c, (0, 0), sigmaX=sig)
@@ -90,9 +78,7 @@ def _etf(gray: np.ndarray, sigma: float):
 
 
 def _bezier(points: np.ndarray, n: int = 10) -> np.ndarray:
-    """Collapse a grown spine to one quadratic Bezier (endpoints + the
-    midpoint pulled through the half-arc-length point). Three control points
-    is what SOTA painters use — it structurally can't wobble."""
+    """Fit one quadratic Bezier through the spine's ends and arc-length midpoint."""
     if len(points) < 3:
         return points
     seg = np.linalg.norm(np.diff(points, axis=0), axis=1)
@@ -108,9 +94,11 @@ def _bezier(points: np.ndarray, n: int = 10) -> np.ndarray:
 def generate_strokes(src: np.ndarray, maps: Maps, cfg: Config,
                      rng: np.random.Generator, phases: bool = True,
                      ground: np.ndarray | None = None) -> list[Stroke]:
-    """src: float32 RGB HxWx3 in 0-255 at base resolution. With phases=True
-    (the artist pipeline) a full-canvas wash precedes the paint layers and a
-    highlight pass follows them; --classic sets phases=False."""
+    """src: float32 RGB HxWx3 in 0-255 at base resolution.
+
+    phases=True wraps the paint layers in a wash and a highlight pass;
+    --classic sets it False for plain Hertzmann output.
+    """
     h, w = src.shape[:2]
     scale = max(h, w) / 1080
     base = ground if ground is not None else np.array(PAPER_COLOR, np.float32)
@@ -147,19 +135,16 @@ def generate_strokes(src: np.ndarray, maps: Maps, cfg: Config,
                 continue
             if (layer >= 3 and maps.face_ids[sy, sx] > 0
                     and rng.random() < 0.45):
-                # Full v0.13-style face layering, moderated: the finest
-                # layers are thinned so the face never over-renders; the
-                # face pass and the sharp eye pass finish it.
+                # thin the finest layers over faces so they don't over-render;
+                # the face and eye passes finish them properly
                 continue
-            # Per-stroke variety: width jitter, and length biased shorter in
-            # tight (high-detail) areas — dabs on the subject, lazier strokes
-            # in the background.
+            # shorter where detail is high: dabs on the subject, sweeps behind
             jradius = radius * rng.uniform(*cfg.radius_jitter)
             high = max(cfg.min_stroke_points + 1,
                        round(cfg.max_stroke_points * (1.0 - 0.45 * detail)))
             rot = rng.normal(0.0, np.radians(cfg.direction_jitter))
             if rng.random() < cfg.cross_rate:
-                rot += np.pi / 2  # the occasional cross-stroke
+                rot += np.pi / 2
             points = _grow_stroke(sx, sy, jradius, ref, canvas, painted,
                                   tx, ty, tstr, maps.nearness, cfg,
                                   rand_angle=rng.uniform(0, 2 * np.pi),
@@ -171,7 +156,7 @@ def generate_strokes(src: np.ndarray, maps: Maps, cfg: Config,
                                     sat_scale=sat if phases else 1.0)
             alpha = cfg.min_alpha + (1.0 - cfg.min_alpha) * detail
             if layer <= 1:
-                alpha = max(alpha, 0.92)  # opaque block-in over the wash
+                alpha = max(alpha, 0.92)  # block-in goes down opaque over the wash
             stroke = Stroke(
                 points=_bezier(points),
                 radius=jradius,
@@ -200,8 +185,7 @@ def generate_strokes(src: np.ndarray, maps: Maps, cfg: Config,
 def _eye_pass(src: np.ndarray, canvas: np.ndarray, painted: np.ndarray,
               maps: Maps, cfg: Config, rng: np.random.Generator,
               scale: float, strokes: list[Stroke]) -> None:
-    """The finest strokes in the painting, restricted to the eyes — a
-    portrait lives or dies by them. Lands after the face pass."""
+    """Finest strokes in the painting, eyes only. Runs after the face pass."""
     if not maps.eyes.any():
         return
     top = int(maps.buckets.max())
@@ -242,8 +226,8 @@ def _eye_pass(src: np.ndarray, canvas: np.ndarray, painted: np.ndarray,
 def _face_pass(src: np.ndarray, canvas: np.ndarray, painted: np.ndarray,
                maps: Maps, cfg: Config, rng: np.random.Generator,
                scale: float, strokes: list[Stroke]) -> None:
-    """One extra-fine layer restricted to detected faces — the face ends up
-    visibly more resolved than the rest, the way portrait painters work."""
+    """One extra-fine layer over detected faces, so they resolve further than
+    the rest of the canvas."""
     if not maps.faces.any():
         return
     top = int(maps.buckets.max())
@@ -259,7 +243,7 @@ def _face_pass(src: np.ndarray, canvas: np.ndarray, painted: np.ndarray,
     err[maps.faces < 0.3] = 0.0
     step = int(round(radius))
     area_err = cv2.boxFilter(err, -1, (step, step))
-    # Scan only the face bounding box — a 2px grid over the full image is slow.
+    # bounding box only; a 2px grid over the full image is slow
     seeds = _failing_cells(err[y0:y1, x0:x1], area_err[y0:y1, x0:x1], step,
                            0.6 * cfg.error_threshold)
     seeds = [(sx + x0, sy + y0) for sx, sy in seeds]
@@ -287,8 +271,10 @@ def _wash_pass(src: np.ndarray, canvas: np.ndarray, maps: Maps, cfg: Config,
                rng: np.random.Generator, scale: float,
                strokes: list[Stroke], ground: np.ndarray) -> None:
     """Imprimatura: tone the whole canvas with big thin desaturated washes.
-    Doesn't mark pixels painted — the block-in covers it, and its color only
-    survives as an undertone through translucent later strokes."""
+
+    Deliberately doesn't mark pixels painted, so the block-in still covers
+    everything and the wash survives only as undertone.
+    """
     h, w = src.shape[:2]
     radius = cfg.wash_radius * scale
     ref = cv2.GaussianBlur(src, (0, 0), sigmaX=2 * radius)
@@ -296,8 +282,7 @@ def _wash_pass(src: np.ndarray, canvas: np.ndarray, maps: Maps, cfg: Config,
     tx, ty, tstr = _etf(gray, sigma=radius)
     painted = np.zeros((h, w), bool)  # local: wash never stops early
 
-    # Dense grid plus explicit border rows/cols so tapered strokes still
-    # tone the canvas to its very edges.
+    # explicit border row/col so tapered strokes reach the canvas edges
     step = max(1, int(round(0.75 * radius)))
     xs = sorted({*range(0, w, step), w - 1})
     ys = sorted({*range(0, h, step), h - 1})
@@ -322,9 +307,10 @@ def _wash_pass(src: np.ndarray, canvas: np.ndarray, maps: Maps, cfg: Config,
 def _highlight_pass(src: np.ndarray, maps: Maps, cfg: Config,
                     rng: np.random.Generator, scale: float,
                     strokes: list[Stroke]) -> None:
-    """Final accents: the thickest, most opaque, smallest strokes, placed
-    where the subject is locally brightest — glints, whiskers, rim light.
-    (Bright-only: dark accents read as speckle noise, not painting.)"""
+    """Final accents: small, thick, opaque strokes on local bright spots.
+
+    Bright-only, because dark accents read as speckle noise.
+    """
     gray = cv2.cvtColor(src, cv2.COLOR_RGB2GRAY)
     score = gray - cv2.GaussianBlur(gray, (0, 0), sigmaX=8 * scale)
     score[maps.detail < cfg.highlight_detail] = 0
@@ -359,8 +345,8 @@ def _highlight_pass(src: np.ndarray, maps: Maps, cfg: Config,
 
 def _failing_cells(err: np.ndarray, area_err: np.ndarray, step: int,
                    threshold: float) -> list[tuple[int, int]]:
-    """Cells whose mean error exceeds threshold; seed = argmax-error pixel
-    in the cell. Returned sorted by cell error, worst first."""
+    """Cells over the error threshold, worst first. Seed is the cell's
+    argmax-error pixel."""
     h, w = err.shape
     out = []
     for y0 in range(0, h, step):
@@ -376,9 +362,9 @@ def _failing_cells(err: np.ndarray, area_err: np.ndarray, step: int,
     return [(x, y) for _, x, y in out]
 
 
-VANISH_EPS = 2.0  # Sobel magnitude below this = flat region, go straight.
-                  # High enough that sensor noise in near-black areas (dark
-                  # clothing) doesn't curl strokes into tangles.
+VANISH_EPS = 2.0  # below this Sobel magnitude the region is flat, go straight.
+                  # high enough that sensor noise in near-black areas (dark
+                  # clothing) doesn't curl strokes into tangles
 
 
 def _grow_stroke(x0: int, y0: int, radius: float, ref: np.ndarray,
@@ -409,7 +395,7 @@ def _grow_stroke(x0: int, y0: int, radius: float, ref: np.ndarray,
             break
 
         if tstr[iy, ix] < VANISH_EPS:
-            # Flat region: long straight strokes read as paint, dots don't.
+            # flat region: keep going straight, dots don't read as paint
             if i == 1:
                 dx, dy = np.cos(rand_angle), np.sin(rand_angle)
             else:
@@ -429,8 +415,8 @@ def _grow_stroke(x0: int, y0: int, radius: float, ref: np.ndarray,
                 break
             dx, dy = dx / norm, dy / norm
             if i > 1:
-                # A brush mark bends only so far: clamp the per-step turn and
-                # stop when the total turn is spent — dabs and arcs, not worms.
+                # clamp the per-step turn and stop once the budget is spent,
+                # else strokes curl into worms
                 dtheta = np.arctan2(last_dx * dy - last_dy * dx,
                                     last_dx * dx + last_dy * dy)
                 if abs(dtheta) > step_limit:
@@ -454,9 +440,10 @@ def _grow_stroke(x0: int, y0: int, radius: float, ref: np.ndarray,
 def _jittered_color(color: np.ndarray, detail: float, cfg: Config,
                     rng: np.random.Generator,
                     sat_scale: float = 1.0) -> np.ndarray:
-    """Loose (low-detail) strokes drift in hue/value; tight strokes stay
-    true. sat_scale < 1 gives the lean desaturated block-in look — later
-    full-saturation layers bring the color back."""
+    """Low-detail strokes drift in hue/value, tight ones stay true.
+
+    sat_scale < 1 gives the lean block-in look; later layers restore color.
+    """
     sigma = cfg.jitter * (1.0 - detail)
     if sigma < 0.5 and sat_scale >= 1.0:
         return color.astype(np.float32).copy()

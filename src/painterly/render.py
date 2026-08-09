@@ -1,15 +1,8 @@
 """Stroke rasterization, ROI-scoped.
 
-Two paths: a fast flat one (AA polyline, uniform width — used while
-GENERATING strokes, where the canvas only feeds error maps), and the final
-path: each stroke is a TAPERED TEXTURED RIBBON — a canonical bristle
-texture warped piecewise along the Bezier spine (the Stylized Neural
-Painting / Paint Transformer mechanism), with width and opacity following a
-natural pressure profile — lognormal-ish taper at both ends (Plamondon's
-kinematic theory of hand movements), widening through curves (the
-two-thirds power law), plus a little deterministic tremor. Bristle streaks
-run ALONG the stroke, which is what makes a mark read as a brush stroke
-rather than a stamped sausage. Sketch lines keep a soft-disc pencil look.
+Fast path: flat AA polyline, used during generation where the canvas only
+feeds error maps. Final path: a bristle texture warped along the Bezier
+spine, with width and opacity from a pressure profile.
 """
 from collections.abc import Callable, Iterable
 from functools import lru_cache
@@ -19,9 +12,7 @@ import numpy as np
 
 PAPER_COLOR = (245, 242, 235)  # warm off-white canvas
 
-# Playback phases, in the order a painter works: the drawing goes down on
-# the bare canvas first; wash and paint then appear UNDER it (the sketch
-# lives on the timelapse overlay layer, never on the painting itself).
+# playback order; the sketch lives on the timelapse overlay, never on the canvas
 SKETCH, WASH, PAINT, HIGHLIGHT = 0, 1, 2, 3
 
 
@@ -32,9 +23,10 @@ def blank_canvas(h: int, w: int,
 
 
 def ground_color(src: np.ndarray) -> np.ndarray:
-    """Adaptive imprimatura tone: the image's mean color, half-desaturated,
-    clamped to a mid value — darker scenes get a darker ground, and gaps in
-    coverage read as toned canvas instead of glowing white paper."""
+    """Imprimatura tone: mean color, half-desaturated, clamped to a mid value.
+
+    Keeps gaps in coverage reading as toned canvas rather than white paper.
+    """
     mean = src.reshape(-1, 3).mean(axis=0).astype(np.float32)
     gray = float(mean @ np.array([0.299, 0.587, 0.114], np.float32))
     c = mean + 0.5 * (gray - mean)
@@ -51,13 +43,14 @@ def draw_stroke(canvas: np.ndarray, stroke, scale: float = 1.0,
                 face_blocks: dict[int, np.ndarray] | None = None,
                 cover: np.ndarray | None = None,
                 fast: bool = False) -> None:
-    """buckets (same HxW as canvas) enforces the painter's rule: a stroke may
-    slop onto planes that are painted later (they repaint over it) but never
-    onto finished ones. With subject-first ordering that means background
-    strokes also CUT IN around the already-established subject. Wash and
-    sketch phases bypass the rule — they cover the whole canvas by design.
-    soft_masks (per-bucket feathered masks from soft_bucket_masks) applies
-    the same rule with a soft edge — hard cuts read as seams in the render."""
+    """Rasterize one stroke into canvas.
+
+    buckets (same HxW as canvas) enforces the painter's rule: a stroke may
+    slop onto planes painted later, never onto finished ones, so background
+    strokes cut in around the established subject. soft_masks applies the
+    same rule feathered, since hard cuts read as seams in the final render.
+    Wash and sketch bypass it; they cover the whole canvas by design.
+    """
     h, w = canvas.shape[:2]
     pts = stroke.points * scale
     radius = stroke.radius * scale
@@ -71,8 +64,8 @@ def draw_stroke(canvas: np.ndarray, stroke, scale: float = 1.0,
 
     local = pts - (x0, y0)
     if fast:
-        # Slightly thinner than the real render so error-driven placement
-        # over-covers relative to the tapered pressure strokes.
+        # thinner than the real render, so error-driven placement over-covers
+        # relative to the tapered pressure strokes
         mask = _flat_mask((y1 - y0, x1 - x0), local, radius * 0.7)
     else:
         mask = _pressure_mask((y1 - y0, x1 - x0), local, radius, stroke,
@@ -81,10 +74,9 @@ def draw_stroke(canvas: np.ndarray, stroke, scale: float = 1.0,
     a = mask * stroke.alpha
     if (face_blocks is not None and stroke.phase == PAINT
             and stroke.layer > 0):
-        # Each face is painted only by its own strokes: once refined,
-        # nothing later — not even the neighboring face's turn — may smear
-        # it (the layer-0 base coat precedes all faces and is exempt;
-        # highlights are a different phase).
+        # a face accepts only its own strokes, so painting the next face
+        # can't smear the finished one. layer 0 runs before any face and is
+        # exempt; highlights are a different phase.
         a *= 1.0 - face_blocks.get(stroke.face_id,
                                    face_blocks[0])[y0:y1, x0:x1]
     if stroke.phase >= PAINT:
@@ -100,16 +92,15 @@ def draw_stroke(canvas: np.ndarray, stroke, scale: float = 1.0,
     roi = canvas[y0:y1, x0:x1]
     color = stroke.color
     if stroke.blend > 0.0:
-        # Wet mixing: the brush picks up the paint below. Sampling along the
-        # spine is as plausible as a full-area mean and much cheaper.
+        # wet mixing; sampling along the spine is as plausible as a full-area
+        # mean and much cheaper
         sx = np.clip(np.round(pts[:, 0]).astype(int), 0, w - 1)
         sy = np.clip(np.round(pts[:, 1]).astype(int), 0, h - 1)
         color = (1.0 - stroke.blend) * color \
             + stroke.blend * canvas[sy, sx].mean(axis=0)
     roi[:] = a * color + (1.0 - a) * roi
     if cover is not None:
-        # A thin wash doesn't erase a pencil line — it only veils it; solid
-        # paint buries it.
+        # a thin wash only veils a pencil line; solid paint buries it
         ca = a[..., 0] * (0.35 if stroke.phase == WASH else 1.0)
         c = cover[y0:y1, x0:x1]
         c[:] = ca + (1.0 - ca) * c
@@ -156,9 +147,10 @@ def _pressure_mask(shape: tuple[int, int], pts: np.ndarray, radius: float,
 def _ribbon_mask(shape: tuple[int, int], centers: np.ndarray,
                  tangents: np.ndarray, ts: np.ndarray, half: np.ndarray,
                  alphas: np.ndarray) -> np.ndarray:
-    """Warp arc-length slices of the canonical bristle texture onto the
-    quads of the widening/tapering ribbon (SNP/PaintTransformer mechanism,
-    piecewise so streaks follow the curve)."""
+    """Warp arc-length slices of the bristle texture onto the ribbon's quads.
+
+    Piecewise, so the streaks follow the curve instead of shearing across it.
+    """
     tex = _bristle_texture()
     th, tw = tex.shape
     mask = np.zeros(shape, np.float32)
@@ -189,8 +181,7 @@ def _ribbon_mask(shape: tuple[int, int], centers: np.ndarray,
 
 @lru_cache(maxsize=1)
 def _bristle_texture(th: int = 96, tw: int = 384) -> np.ndarray:
-    """Canonical grayscale brush texture, bristle streaks along x, soft
-    lateral falloff, ragged ends. Deterministic (fixed seed)."""
+    """Grayscale brush texture: streaks along x, lateral falloff, ragged ends."""
     r = np.random.default_rng(11)
     rows = r.uniform(0.5, 1.0, th).astype(np.float32)
     tex = cv2.GaussianBlur(np.repeat(rows[:, None], tw, axis=1), (0, 0),
@@ -210,9 +201,11 @@ def _bristle_texture(th: int = 96, tw: int = 384) -> np.ndarray:
 
 def _pressure(ts: np.ndarray, tangents: np.ndarray, seq: int,
               firmness: float = 1.0) -> np.ndarray:
-    """Per-stamp pressure in ~[0.05, 1.3]: quick landing, longer lift-off,
-    heavier through curves, seeded tremor. A firm (fully loaded, large)
-    brush barely tapers; a light one breathes."""
+    """Per-stamp pressure in ~[0.05, 1.3].
+
+    Quick landing, longer lift-off, heavier through curves, plus tremor. A
+    firm brush barely tapers; a light one breathes.
+    """
     t_in = 0.25 - 0.19 * firmness
     t_out = 0.32 - 0.24 * firmness
     taper = np.clip(ts / t_in, 0, 1) ** 0.6 * np.clip((1 - ts) / t_out, 0, 1) ** 0.6
@@ -263,10 +256,11 @@ def _max_stamp(mask: np.ndarray, tip: np.ndarray, x0: int, y0: int) -> None:
 
 def face_block_masks(face_ids: np.ndarray | None, h: int,
                      w: int) -> dict[int, np.ndarray] | None:
-    """Per-face-id feathered 'keep out' masks: blocked[0] covers every face
-    (for strokes belonging to none), blocked[k] covers every face EXCEPT
-    face k — a stroke may only ever paint inside its own face, so finishing
-    one face and then painting its neighbor can never smear the first."""
+    """Feathered keep-out masks per face id.
+
+    blocked[0] covers every face, for strokes belonging to none; blocked[k]
+    covers every face except k.
+    """
     if face_ids is None or not face_ids.any():
         return None
     ids = face_ids
@@ -289,9 +283,7 @@ def scaled_buckets(buckets: np.ndarray | None, h: int, w: int) -> np.ndarray | N
 
 def soft_bucket_masks(buckets: np.ndarray | None, h: int, w: int,
                       sigma: float) -> dict[int, np.ndarray] | None:
-    """Per-bucket feathered painter's-rule masks. Background strokes may
-    slop onto later-painted background planes but are cut in around the
-    subject (top bucket), which is established before them."""
+    """Per-bucket feathered painter's-rule masks (see draw_stroke)."""
     if buckets is None:
         return None
     bmap = scaled_buckets(buckets, h, w)
@@ -310,8 +302,10 @@ def replay(strokes: Iterable, h: int, w: int, scale: float = 1.0,
            ground: np.ndarray | None = None,
            face_ids: np.ndarray | None = None,
            on_stroke: Callable[[int], None] | None = None) -> np.ndarray:
-    """Re-rasterize strokes in the given order onto a blank canvas at
-    h*scale x w*scale. on_stroke(i) fires after stroke i is drawn."""
+    """Re-rasterize strokes onto a blank h*scale x w*scale canvas.
+
+    on_stroke(i) fires after stroke i is drawn.
+    """
     ch, cw = int(round(h * scale)), int(round(w * scale))
     canvas = blank_canvas(ch, cw, ground)
     soft = None if fast else soft_bucket_masks(buckets, ch, cw, 3.0 * scale)
