@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -27,23 +27,13 @@ class Config:
     max_strokes_per_layer: int = 12000
     radius_jitter: tuple[float, float] = (0.65, 1.35)  # per-stroke width variety
     step_turn_limit: float = 28.0       # deg; max direction change per step
-    max_turn: float = 60.0              # deg; total turn budget (SOTA painters
-                                        # cap ~45-60 deg — beyond that = worms)
-    subject_blockin_layers: int = 2     # subject layers painted BEFORE the
-                                        # background (figure established first)
+    max_turn: float = 60.0              # deg; total turn budget, past ~60 the
+                                        # strokes read as worms
     direction_jitter: float = 0.0       # deg; per-stroke rotation off the ETF
-                                        # field (0 = the clean v0.13 look)
-    cross_rate: float = 0.0             # fraction of near-perpendicular
-                                        # cross-strokes (0 = v0.13 look)
-    face_flow: str = "one-go"           # v11: one face at a time to ~95%,
-                                        #      end-of-painting polish + eyes
-                                        # one-go: each face 100% in its turn
-                                        # together: all faces interleaved,
-                                        #      polish at the end
-    face_return_frac: float = 0.35      # slice of the fine face pass held
-                                        # back: face hits ~85%% in its turn,
-                                        # the return after the background
-                                        # brings it to ~95%%
+    cross_rate: float = 0.0             # fraction of perpendicular cross-strokes
+    face_flow: str = "one-go"           # one-go: each face 100% in its turn
+                                        # v11: to ~95%, polish at the end
+                                        # together: all faces interleaved
 
     # Depth / saliency modulation
     depth_buckets: int = 4
@@ -66,26 +56,21 @@ class Config:
     # Sketch (underdrawing) phase
     sketch_radius: float = 1.0
     sketch_alpha: float = 0.55          # nothing in the sketch gets darker
-    sketch_color: tuple[int, int, int] = (170, 166, 160)  # light gray — the
-                                        # whole sketch is this color, per the
-                                        # user's reference style
+    sketch_color: tuple[int, int, int] = (170, 166, 160)  # the whole sketch
     sketch_length_budget: float = 5.0   # total line length, x image diagonal
     sketch_max_seg: float = 150.0       # split long chains so they draw over frames
     sketch_passes: tuple[int, int] = (1, 2)  # restated passes per contour (min, max)
     sketch_jitter: float = 2.0          # px of hand wobble on the first pass
-    sketch_simplify: float = 10.0       # approxPolyDP epsilon (x scale): long
-                                        # straight segments, not contour tracing
+    sketch_simplify: float = 10.0       # approxPolyDP epsilon, x scale
     sketch_erase_rate: float = 0.05     # chance a line is drawn wrong, undone, redrawn
-
 
     # Highlight phase
     highlight_count: int = 15
     highlight_radius: float = 2.0
     highlight_detail: float = 0.6
-    highlight_min_accent: float = 60.0  # brightness-above-surroundings floor;
-                                        # high on purpose — accents are rare,
-                                        # and on texture-heavy subjects they
-                                        # must stay inconspicuous
+    highlight_min_accent: float = 60.0  # brightness-above-surroundings floor.
+                                        # deliberately high: on texture-heavy
+                                        # subjects accents must stay rare
 
     # Timelapse
     fps: int = 30
@@ -93,7 +78,7 @@ class Config:
     hold_seconds: float = 1.0
     ease_power: float = 2.2
     phase_fractions: tuple[float, ...] = (0.18, 0.08, 0.64, 0.10)  # sketch/wash/paint/highlight
-    coherence_cells: int = 5            # spatial cells per axis for region-at-a-time order
+    coherence_cells: int = 5            # cells per axis for region-at-a-time order
 
     @property
     def debug_dir(self) -> Path:
@@ -101,6 +86,6 @@ class Config:
 
     @property
     def cache_dir(self) -> Path:
-        # Global, not per-output-dir: model outputs depend only on the input
-        # image and working size, so a new -o dir shouldn't re-run models.
+        # global, not per-output-dir: model outputs depend only on the input
+        # image and working size, so a new -o dir shouldn't re-run models
         return Path.home() / ".cache" / "painterly"

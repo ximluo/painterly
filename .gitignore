@@ -4,6 +4,7 @@ __pycache__/
 out/
 test_v0.*/
 test*/
+!tests/
 .DS_Store
 .claude/
 .Rhistory

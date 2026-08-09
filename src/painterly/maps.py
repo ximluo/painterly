@@ -1,6 +1,6 @@
-"""Depth (Depth Anything V2 on MPS), saliency (BiRefNet via rembg), and the
-derived detail/bucket maps that drive stroke ordering. Model outputs are
-cached as .npy so reruns skip inference entirely.
+"""Depth, saliency, and the detail/bucket maps that drive stroke ordering.
+
+Model outputs are cached as .npy so reruns skip inference.
 """
 import os
 from dataclasses import dataclass
@@ -23,17 +23,13 @@ class Maps:
     nearness: np.ndarray   # float32 [0,1], 1 = nearest (DA V2 is inverse depth)
     saliency: np.ndarray   # float32 [0,1] soft subject matte
     detail: np.ndarray     # float32 [0,1] how much fine detail a pixel earns
-    buckets: np.ndarray    # uint8 paint groups: 0 = farthest, painted first;
-                           # the salient subject is promoted to the last group
-                           # even when something else (a foreground ledge) is
-                           # nearer — a painter saves the subject for last
-    faces: np.ndarray      # float32 [0,1] feathered face regions (human or
-                           # cat); earns extra-fine strokes
-    eyes: np.ndarray       # float32 [0,1] feathered eye regions (YuNet
-                           # landmarks; synthesized for cats) — the most
-                           # refined spots in the whole painting
-    face_ids: np.ndarray   # uint8: 0 = no face, k = face k's ellipse; a
-                           # paint stroke may only enter its OWN face
+    buckets: np.ndarray    # uint8 paint groups, 0 = farthest = painted first.
+                           # the subject is promoted to the last group even
+                           # when something else is nearer
+    faces: np.ndarray      # float32 [0,1] feathered face regions, human or cat
+    eyes: np.ndarray       # float32 [0,1] feathered eye regions
+    face_ids: np.ndarray   # uint8: 0 = no face, k = face k's ellipse. a paint
+                           # stroke may only enter its own face
 
 
 def compute_maps(img: np.ndarray, cfg: Config) -> Maps:
@@ -47,9 +43,9 @@ def compute_maps(img: np.ndarray, cfg: Config) -> Maps:
                      + cfg.nearness_weight * nearness, 0, 1).astype(np.float32)
     detail = np.maximum(detail, 0.9 * faces)
     detail = np.maximum(detail, eyes)
-    # Equal-population quantile buckets — robust to skewed depth histograms —
-    # then merge adjacent buckets whose depths barely differ: on a shallow
-    # background the quantile lines are arbitrary and would paint as seams.
+    # equal-population quantile buckets, then merge adjacent ones whose depths
+    # barely differ: on a shallow background the quantile lines are arbitrary
+    # and paint as seams
     qs = np.quantile(nearness, np.linspace(0, 1, cfg.depth_buckets + 1)[1:-1])
     buckets = np.digitize(nearness, qs).astype(np.uint8)
     medians = [float(np.median(nearness[buckets == b])) if (buckets == b).any()
@@ -60,17 +56,17 @@ def compute_maps(img: np.ndarray, cfg: Config) -> Maps:
                     and medians[b] - medians[b - 1] >= cfg.bucket_merge)
         relabel.append(relabel[-1] + int(distinct))
     buckets = np.array(relabel, np.uint8)[buckets]
-    # Close small holes in the matte (a chest pixel left outside the subject
-    # would get its strokes scheduled in the LATE background ranks and smear
-    # the refined figure — the body version of the v0.13 face bug).
+    # close holes in the matte: a pixel left outside the subject gets its
+    # strokes scheduled in the late background ranks, which smears the figure
     subj = (saliency > 0.5).astype(np.uint8)
     subj = cv2.morphologyEx(subj, cv2.MORPH_CLOSE,
                             np.ones((15, 15), np.uint8))
     holes = subj.copy()
     ffmask = np.zeros((subj.shape[0] + 2, subj.shape[1] + 2), np.uint8)
     cv2.floodFill(holes, ffmask, (0, 0), 1)
-    subj[holes == 0] = 1  # anything flood-fill couldn't reach = interior hole
-    buckets[subj > 0] = buckets.max() + 1
+    subj[holes == 0] = 1  # anything flood fill couldn't reach is an interior hole
+    # int() so numpy raises on uint8 overflow instead of wrapping to 0
+    buckets[subj > 0] = int(buckets.max()) + 1
     return Maps(nearness, saliency, detail, buckets, faces, eyes, face_ids)
 
 
@@ -83,16 +79,18 @@ def neutral_maps(h: int, w: int) -> Maps:
                 eyes=zeros.copy(), face_ids=np.zeros((h, w), np.uint8))
 
 
-ASSETS = Path(__file__).resolve().parents[2] / "assets"
+ASSETS = Path(__file__).parent / "assets"
 
 
-def _detect_faces(img: np.ndarray,
-                  saliency: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Feathered masks of detected faces and their eyes, restricted to the
-    salient subject. YuNet (tiny ONNX, vendored — OpenCV 5 wheels stopped
-    bundling detector data) handles tilted and profile human faces and
-    provides eye landmarks; a Haar cascade covers cats (eyes synthesized at
-    the standard proportions of the face box)."""
+def _detect_faces(
+        img: np.ndarray,
+        saliency: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Feathered (faces, eyes, face_ids) masks, restricted to the subject.
+
+    YuNet handles tilted and profile human faces and gives eye landmarks; a
+    Haar cascade covers cats, with eyes synthesized from the box proportions.
+    The ONNX is vendored because OpenCV 5 wheels stopped bundling it.
+    """
     h, w = img.shape[:2]
     boxes: list[tuple[int, int, int, int]] = []
     eye_pts: list[tuple[float, float, float]] = []  # (x, y, face width)
@@ -107,8 +105,8 @@ def _detect_faces(img: np.ndarray,
             e1 = (float(f[6]), float(f[7]))
             fw_ = float(f[2])
             eye_pts.append((*e0, fw_))
-            # Profile view: YuNet's two eye landmarks nearly coincide — the
-            # second would drop dark paint on the cheek. Keep one eye.
+            # in profile YuNet's two eye landmarks nearly coincide, and the
+            # second one drops dark paint on the cheek
             if np.hypot(e1[0] - e0[0], e1[1] - e0[1]) > 0.3 * fw_:
                 eye_pts.append((*e1, fw_))
 
@@ -151,10 +149,16 @@ def _detect_faces(img: np.ndarray,
     return faces, eyes, face_ids
 
 
-def _cached(cfg: Config, name: str, compute) -> np.ndarray:
+def _content_tag(path: Path) -> str:
     import hashlib
 
-    tag = hashlib.md5(str(cfg.input_path.resolve()).encode()).hexdigest()[:8]
+    return hashlib.md5(path.read_bytes()).hexdigest()[:8]
+
+
+def _cached(cfg: Config, name: str, compute) -> np.ndarray:
+    # keyed on file contents, so overwriting an input image in place
+    # invalidates its cached maps
+    tag = _content_tag(cfg.input_path)
     path = cfg.cache_dir / f"{cfg.input_path.stem}.{tag}.{cfg.size}.{name}.npy"
     if path.exists():
         return np.load(path)

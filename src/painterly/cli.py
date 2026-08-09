@@ -35,7 +35,7 @@ def main() -> None:
     p.add_argument("--debug", action="store_true", help="dump intermediate maps")
     p.add_argument("--face-flow", default="one-go",
                    choices=["v11", "one-go", "together"],
-                   help="how faces are sequenced (default: v11)")
+                   help="how faces are sequenced (default: one-go)")
     args = p.parse_args()
 
     cfg = Config(
@@ -81,17 +81,15 @@ def run(cfg: Config, classic: bool = False) -> None:
     ordered = painter_order(strokes, h, w, cfg.coherence_cells, rng,
                             n_layers=len(cfg.radii),
                             face_flow=cfg.face_flow)
-    # The canvas starts as light paper — the sketch goes down first, then
-    # the wash visibly tones it under the drawing. `ground` still tints the
-    # wash colors themselves.
+    # ground=None: the canvas starts as paper and the wash tones it on camera.
+    # ground still tints the wash colors themselves.
     if cfg.video:
         canvas = write_timelapse(ordered, h, w, cfg, textured=cfg.texture,
                                  buckets=maps.buckets, ground=None,
                                  face_ids=maps.face_ids)
         print(f"timelapse {time.perf_counter() - t0:6.1f}s   {cfg.out_dir / 'timelapse.mp4'}")
     else:
-        # The sketch lives only on the video overlay — the painting itself
-        # never receives it.
+        # the sketch lives only on the video overlay
         canvas = replay([s for s in ordered if s.phase != SKETCH], h, w,
                         scale=cfg.supersample, textured=cfg.texture,
                         buckets=maps.buckets, ground=None,

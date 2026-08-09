@@ -1,20 +1,9 @@
-"""Global stroke ordering: the painter's sequence.
+"""Global stroke ordering.
 
-Sketch first on the bare canvas (it lives on the timelapse overlay), then
-wash, then paint the way portrait tutorials teach (Realism Today demos,
-Lustenhouwer's landmark-chain, Pastel Today): the SUBJECT's base coat
-under the drawing (the background stays bare wash until the faces are
-mostly done — its base weaves in only near the end of the face turns);
-then ONE FACE AT A TIME, largest first, each brought to
-100% finish in its own single turn — coarse-to-fine, eyes leading each
-layer, the extra-fine face pass and then the eye pass closing it (a
-portrait lives or dies by the eyes); then each figure's body refined
-through SEMANTIC ZONES — hair/head surround first (hair is detailed after
-the face), then neck, shoulders, torso, flowing downward — never by
-concentric distance, which reads as a machine; then background far-to-near.
-The cut-in and per-face protection masks in draw_stroke keep all
-reordering artifact-free: a finished face can never be smeared, not even
-by the neighboring face's turn.
+Sketch, wash, subject base coat, one face at a time (largest first, each
+finished in its own turn), each body by downward zone, then background
+far-to-near. Reordering is safe because draw_stroke's cut-in and per-face
+masks stop a later stroke from smearing a finished region.
 """
 import numpy as np
 
@@ -23,7 +12,7 @@ from .strokes import PAINT, SKETCH, WASH
 
 def painter_order(strokes: list, h: int, w: int, cells: int,
                   rng: np.random.Generator,
-                  n_layers: int = 5, face_flow: str = "v11") -> list:
+                  n_layers: int = 5, face_flow: str = "one-go") -> list:
     cell_h, cell_w = h / cells, w / cells
     row_dir = 1 if rng.random() < 0.5 else -1
     top = max((s.bucket for s in strokes), default=0)
@@ -31,10 +20,9 @@ def painter_order(strokes: list, h: int, w: int, cells: int,
     anchors, sizes = _figures(paint, h, w)
     n_f = len(anchors)
 
-    # face_id is the SINGLE source of truth for face-turn membership — the
-    # same field the protection mask uses. (Using anything else lets a
-    # protected-region stroke land in a later rank and paint over the
-    # finished face: the v0.12/13 pale-blob bug.)
+    # face_id decides face-turn membership, and must stay the same field the
+    # protection mask uses. Anything else lets a protected stroke sort into a
+    # later rank and paint over the finished face.
     fid_counts: dict[int, int] = {}
     for s in paint:
         if s.face_id:
@@ -43,13 +31,12 @@ def painter_order(strokes: list, h: int, w: int, cells: int,
                  enumerate(sorted(fid_counts, key=lambda k: -fid_counts[k]))}
     n_faces = max(len(face_turn), 1)
     FINAL = 99
-    # v11 arc: ~80% of the fine face pass lands in the face's own turn; the
-    # held-back slice and the eye pass polish each face at the very end.
-    deferred = ({id(s) for s in paint
+    # hold back ~20% of the fine face pass so each face gets a visible polish
+    # at the very end rather than finishing all at once mid-painting
+    deferred = ({s.seq for s in paint
                  if s.face_id and s.layer == n_layers
                  and rng.random() < 0.2}
                 if face_flow == "v11" else set())
-
 
     def fig(s) -> int:
         p = s.points[0]
@@ -57,8 +44,7 @@ def painter_order(strokes: list, h: int, w: int, cells: int,
                    key=lambda i: (p[0] - anchors[i][0]) ** 2
                    + (p[1] - anchors[i][1]) ** 2)
 
-    BG_BASE = 1 + n_faces  # background base: the land past the wash stays
-                           # bare until the faces are mostly done
+    BG_BASE = 1 + n_faces
 
     def rank(s) -> int:
         if s.layer == 0:
@@ -67,7 +53,7 @@ def painter_order(strokes: list, h: int, w: int, cells: int,
             return BG_BASE                        # bg base waits for faces
         if s.face_id:
             if face_flow == "v11" and (s.layer > n_layers
-                                       or id(s) in deferred):
+                                       or s.seq in deferred):
                 return FINAL                      # end-of-painting polish
             if face_flow == "together":
                 return FINAL if s.layer >= n_layers else 1
@@ -77,7 +63,7 @@ def painter_order(strokes: list, h: int, w: int, cells: int,
         return 2 + n_faces + n_f + s.bucket       # then background
 
     def zone(s, fi: int) -> int:
-        """Anatomical flow: hair/head surround, then downward bands."""
+        """Hair/head surround, then bands running down the body."""
         ax, ay = anchors[fi]
         fs = sizes[fi]
         dy = (float(s.points[0, 1]) - ay) / fs
@@ -93,9 +79,8 @@ def painter_order(strokes: list, h: int, w: int, cells: int,
             cy = cells - 1 - cy
         return cy * cells + (cx if cy % 2 == 0 else cells - 1 - cx)
 
-    # Small brushes finish one patch before moving to the next — a painter
-    # doesn't scatter detail strokes across the whole figure. Coarse layers
-    # (0-2) keep free order; fine layers walk a serpentine of finer cells.
+    # fine layers walk a serpentine so small brushes finish one patch before
+    # moving on; coarse layers (0-2) keep free order
     f_cells = cells * 2
 
     def sec(s) -> int:
@@ -117,8 +102,7 @@ def painter_order(strokes: list, h: int, w: int, cells: int,
         if 1 <= r <= n_faces:      # a face: coarse->fine, eyes lead layers
             return (s.phase, r, s.layer, 0 if s.in_eye else 1, sec(s),
                     rng.random(), 0)
-        if n_faces + 1 < r <= n_faces + 1 + n_f:
-            # a figure's body: zones downward, fine strokes patch-by-patch
+        if n_faces + 1 < r <= n_faces + 1 + n_f:   # a figure's body
             return (s.phase, r, zone(s, r - 2 - n_faces), s.layer, sec(s),
                     rng.random(), 0)
         if r == 0:                 # subject base coat, under the drawing
@@ -127,12 +111,10 @@ def painter_order(strokes: list, h: int, w: int, cells: int,
 
     ordered = sorted(strokes, key=key)
 
-    # A painter doesn't stare only at the face: while the face renders,
-    # coarse block-in strokes land elsewhere. Body layer-1 blocks weave
-    # anywhere in the face turns — coarse ONLY, so the face stays the most
-    # detailed region at every moment. The background base weaves into the
-    # LAST QUARTER only: nothing past the wash lands out there until the
-    # faces are mostly done.
+    # Weave some elsewhere-strokes into the face turns so the painting doesn't
+    # look frozen outside the face. Body blocks are coarse only (layer 1), so
+    # the face stays the most resolved region throughout; the background base
+    # is held to the last quarter.
     face_lo = next((i for i, s in enumerate(ordered)
                     if s.phase == PAINT and 1 <= rank(s) <= n_faces), None)
     if face_lo is not None:
@@ -171,8 +153,10 @@ def painter_order(strokes: list, h: int, w: int, cells: int,
 
 
 def _figures(paint: list, h: int, w: int):
-    """Face anchors (largest face first) with per-face size estimates;
-    falls back to the subject centroid when no face was detected."""
+    """Face anchors (largest first) and per-face sizes.
+
+    Falls back to the subject centroid when no face was detected.
+    """
     diag = float(np.hypot(h, w))
     face_pts = np.array([s.points[0] for s in paint if s.in_face], np.float32)
     if len(face_pts) == 0:

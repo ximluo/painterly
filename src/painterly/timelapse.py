@@ -1,10 +1,8 @@
-"""Build-up timelapse: ease-in stroke schedule, frames streamed straight to
-x264 — never buffered (450 frames of 1080p would be ~2.8 GB in RAM).
+"""Build-up timelapse: ease-in stroke schedule, frames streamed to x264.
 
-The sketch also lives on a separate OVERLAY layer during playback: base
-coats visibly go down UNDER the drawing (the Paints-UNDO / digital-painting
-lineart-above-flats workflow), and the drawing dissolves as refinement
-progresses. The overlay never touches the final canvas.
+Frames are never buffered; 450 frames of 1080p would be ~2.8 GB in RAM. The
+sketch plays on a separate overlay so base coats go down under the drawing,
+and never touches the final canvas.
 """
 import dataclasses
 
@@ -17,15 +15,15 @@ from .render import (blank_canvas, draw_stroke, face_block_masks,
 from .strokes import SKETCH
 
 
-PAINT_PHASE = 2  # index into phase_fractions; falls heir to empty phases' frames
+PAINT_PHASE = 2  # index into phase_fractions; inherits empty phases' frames
 
 
 def stroke_schedule(strokes: list, n_frames: int, cfg: Config) -> list[int]:
-    """Cumulative stroke count per frame, allotting screen time per phase
-    (wash/sketch/paint/highlight fractions from config). Strokes must
-    already be phase-sorted. Wash, sketch and highlights play linearly;
-    the paint phase keeps the ease-in power curve (a few big background
-    strokes early, fine detail raining in late)."""
+    """Cumulative stroke count per frame, screen time split by phase_fractions.
+
+    Strokes must already be phase-sorted. Every phase plays linearly except
+    paint, which eases in: a few big strokes early, fine detail late.
+    """
     counts = np.bincount([s.phase for s in strokes], minlength=4)
     frames = [int(round(f * n_frames)) for f in cfg.phase_fractions]
     for i, c in enumerate(counts):
@@ -43,6 +41,8 @@ def stroke_schedule(strokes: list, n_frames: int, cfg: Config) -> list[int]:
         prog = t ** cfg.ease_power if i == PAINT_PHASE else t
         cum.extend((base + np.round(count * prog).astype(int)).tolist())
         base += int(count)
+    if not cum:
+        return [len(strokes)]
     cum[-1] = len(strokes)
     return cum
 
@@ -52,17 +52,17 @@ def write_timelapse(strokes: list, h: int, w: int, cfg: Config,
                     buckets: np.ndarray | None = None,
                     ground: np.ndarray | None = None,
                     face_ids: np.ndarray | None = None) -> np.ndarray:
-    """Render ordered strokes to out_dir/timelapse.mp4; returns the final
-    supersampled canvas (the painting). Sketch strokes never touch the
-    canvas: they live on an overlay composited above each frame, and wrong
-    lines get their own temp layer that vanishes completely on the undo
-    marker (real ctrl-Z). The overlay does NOT fade on a timer — it
-    disappears exactly where paint physically covers it (a per-pixel cover
-    map accumulates every paint stroke's alpha)."""
+    """Render ordered strokes to out_dir/timelapse.mp4.
+
+    Returns the final supersampled canvas. Sketch strokes stay on an overlay
+    composited above each frame, with wrong lines on their own temp layer so
+    an undo marker removes them entirely. The overlay doesn't fade on a
+    timer; it disappears where the cover map says paint covered it.
+    """
     import imageio.v2 as imageio
 
     ss = cfg.supersample
-    # x264 yuv420p needs even dimensions.
+    # x264 yuv420p needs even dimensions
     fw, fh = w - w % 2, h - h % 2
     canvas = blank_canvas(h * ss, w * ss, ground)
     soft = soft_bucket_masks(buckets, h * ss, w * ss, 3.0 * ss)
@@ -76,7 +76,7 @@ def write_timelapse(strokes: list, h: int, w: int, cfg: Config,
     white = np.full(3, 255.0, np.float32)
     gray = np.array(cfg.sketch_color, np.float32)
     omask = None
-    overlay_done = False  # once fully covered it can never come back
+    overlay_done = False  # once buried, the overlay never returns
 
     writer = imageio.get_writer(
         str(cfg.out_dir / "timelapse.mp4"), fps=cfg.fps, codec="libx264",
@@ -90,7 +90,7 @@ def write_timelapse(strokes: list, h: int, w: int, cfg: Config,
                 if stroke.phase == SKETCH:
                     dirty = True
                     if stroke.undo < 0:
-                        temps.pop(-stroke.undo, None)  # ctrl-Z: gone entirely
+                        temps.pop(-stroke.undo, None)  # ctrl-Z
                     elif stroke.undo > 0:
                         layer = temps.setdefault(stroke.undo,
                                                  np.zeros_like(overlay3))
@@ -117,7 +117,7 @@ def write_timelapse(strokes: list, h: int, w: int, cfg: Config,
                                     interpolation=cv2.INTER_AREA)
                 wmap = omask * (1.0 - coverf) * 0.9
                 if wmap.max() < 0.01 and done > 0 and not temps:
-                    overlay_done = omask.max() > 0  # buried for good
+                    overlay_done = omask.max() > 0
                 else:
                     m = wmap[..., None]
                     frame = frame * (1.0 - m) + gray * m
